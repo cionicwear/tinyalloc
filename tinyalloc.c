@@ -1,5 +1,6 @@
 #include "tinyalloc.h"
 #include <stdint.h>
+#include "os/os.h"
 
 #ifdef TA_DEBUG
 extern void print_s(char *);
@@ -29,6 +30,17 @@ static const void *heap_limit = NULL;
 static size_t heap_split_thresh;
 static size_t heap_alignment;
 static size_t heap_max_blocks;
+static struct os_sem sem;
+
+static void ta_lock(struct os_sem *sem)
+{
+    os_sem_pend(sem, OS_TIMEOUT_NEVER);
+}
+
+static void ta_unlock(struct os_sem *sem)
+{
+    os_sem_release(sem);
+}
 
 /**
  * If compaction is enabled, inserts block
@@ -123,6 +135,8 @@ bool ta_init(const void *base, const void *limit, const size_t heap_blocks, cons
     heap->fresh  = (Block *)(heap + 1);
     heap->top    = (size_t)(heap->fresh + heap_blocks);
 
+    os_sem_init(&sem, 1);
+
     Block *block = heap->fresh;
     size_t i     = heap_max_blocks - 1;
     while (i--) {
@@ -134,6 +148,7 @@ bool ta_init(const void *base, const void *limit, const size_t heap_blocks, cons
 }
 
 bool ta_free(void *free) {
+    ta_lock(&sem);
     Block *block = heap->used;
     Block *prev  = NULL;
     while (block != NULL) {
@@ -147,11 +162,14 @@ bool ta_free(void *free) {
 #ifndef TA_DISABLE_COMPACT
             compact();
 #endif
+            ta_unlock(&sem);
             return true;
         }
         prev  = block;
         block = block->next;
     }
+
+    ta_unlock(&sem);
     return false;
 }
 
@@ -214,10 +232,13 @@ static Block *alloc_block(size_t num) {
 }
 
 void *ta_alloc(size_t num) {
+    ta_lock(&sem);
     Block *block = alloc_block(num);
     if (block != NULL) {
+        ta_unlock(&sem);
         return block->addr;
     }
+    ta_unlock(&sem);
     return NULL;
 }
 
@@ -235,12 +256,15 @@ static void memclear(void *ptr, size_t num) {
 }
 
 void *ta_calloc(size_t num, size_t size) {
+    ta_lock(&sem);
     num *= size;
     Block *block = alloc_block(num);
     if (block != NULL) {
         memclear(block->addr, num);
+        ta_unlock(&sem);
         return block->addr;
     }
+    ta_unlock(&sem);
     return NULL;
 }
 
