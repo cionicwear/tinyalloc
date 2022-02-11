@@ -1,5 +1,6 @@
 #include "tinyalloc.h"
 #include <stdint.h>
+#include "os/os.h"
 
 #ifdef TA_DEBUG
 extern void print_s(char *);
@@ -26,8 +27,32 @@ typedef struct {
     size_t heap_split_thresh;
     size_t heap_alignment;
     size_t heap_max_blocks;
+#if MYNEWT_VAL(OS_SCHEDULING)
+    struct os_sem sem;
+#else
+    uint8_t sem;
+#endif
 } Heap;
 
+#if MYNEWT_VAL(OS_SCHEDULING)
+static void ta_lock(struct os_sem *sem)
+{
+    os_sem_pend(sem, OS_TIMEOUT_NEVER);
+}
+
+static void ta_unlock(struct os_sem *sem)
+{
+    os_sem_release(sem);
+}
+#else
+static void ta_lock(uint8_t *sem)
+{
+}
+
+static void ta_unlock(uint8_t *sem)
+{
+}
+#endif
 /**
  * If compaction is enabled, inserts block
  * into free list, sorted by addr.
@@ -126,6 +151,8 @@ bool ta_init(const void *base, const void *limit, const size_t heap_blocks, cons
     heap->fresh  = (Block *)(heap + 1);
     heap->top    = (size_t)(heap->fresh + heap_blocks);
 
+    os_sem_init(&heap->sem, 1);
+
     Block *block = heap->fresh;
     size_t i     = heap->heap_max_blocks - 1;
     while (i--) {
@@ -138,6 +165,9 @@ bool ta_init(const void *base, const void *limit, const size_t heap_blocks, cons
 
 bool ta_free(void *base, void *free) {
     Heap *heap = (Heap *)base;
+    
+    ta_lock(&heap->sem);
+
     Block *block = heap->used;
     Block *prev  = NULL;
     while (block != NULL) {
@@ -151,11 +181,13 @@ bool ta_free(void *base, void *free) {
 #ifndef TA_DISABLE_COMPACT
             compact(heap);
 #endif
+            ta_unlock(&heap->sem);
             return true;
         }
         prev  = block;
         block = block->next;
     }
+    ta_unlock(&heap->sem);
     return false;
 }
 
@@ -219,10 +251,15 @@ static Block *alloc_block(void *base, size_t num) {
 }
 
 void *ta_alloc(void *base, size_t num) {
+    Heap *heap = (Heap *)base;
+    ta_lock(&heap->sem);
     Block *block = alloc_block(base, num);
     if (block != NULL) {
+        ta_unlock(&heap->sem);
         return block->addr;
     }
+
+    ta_unlock(&heap->sem);
     return NULL;
 }
 
@@ -240,12 +277,16 @@ static void memclear(void *ptr, size_t num) {
 }
 
 void *ta_calloc(void *base, size_t num, size_t size) {
+    Heap *heap = (Heap *)base;
+    ta_lock(&heap->sem);
     num *= size;
     Block *block = alloc_block(base,num);
     if (block != NULL) {
         memclear(block->addr, num);
+        ta_unlock(&heap->sem);
         return block->addr;
     }
+    ta_unlock(&heap->sem);
     return NULL;
 }
 
